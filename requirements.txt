@@ -1,4 +1,4 @@
-pandas
-openai
-pandasai
 streamlit
+pandas
+pandasai
+openai
