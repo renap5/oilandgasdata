@@ -1,9 +1,9 @@
-streamlit
+streamlit==1.30.0
 numpy==1.23.5
 pandas==1.5.3
-pandasai==2.3.2
 openpyxl
 pyyaml
 openai
-
-
+pandasai==2.3.2
+streamlit-mic-recorder
+pydub
