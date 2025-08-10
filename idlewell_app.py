@@ -1,4 +1,4 @@
-# idlewell_app.py — Idle Well Inventory assistant (robust loader, mic, confirm, deterministic "oldest" answer)
+# idlewell_app.py — Idle Well Inventory assistant (ignores Unnamed/empty cols, robust loader, mic, confirm)
 
 from pathlib import Path
 import re
@@ -58,13 +58,32 @@ except Exception:
 
 # ---------------------------- Normalize columns -------------------------------
 df = df.copy()
+
+# Strip names and drop fully empty columns early
 df.columns = [str(c).strip() for c in df.columns]
+
+# Build a mask of usable columns: not "Unnamed: x" and not mostly empty
+def _is_unnamed(colname: str) -> bool:
+    return bool(re.match(r"^\s*Unnamed:\s*\d+\s*$", colname, flags=re.I))
+
+def _valid_col(frame: pd.DataFrame, col: str, min_ratio: float = 0.02) -> bool:
+    if col is None:
+        return False
+    name = str(col).strip()
+    if _is_unnamed(name):
+        return False
+    # keep columns with at least N% non-null to avoid junk picks
+    non_null = frame[name].notna().sum() if name in frame.columns else 0
+    return (name in frame.columns) and (non_null >= max(1, int(min_ratio * len(frame))))
+
+# Make a filtered view of columns for matching
+CLEAN_COLS = [c for c in df.columns if _valid_col(df, c)]
 
 def _tokens(s: str):
     return re.findall(r"[A-Za-z0-9]+", s.casefold())
 
 def _fuzzy_find_col(frame: pd.DataFrame, must_have=None, any_of=None):
-    cols = [str(c).strip() for c in frame.columns]
+    cols = CLEAN_COLS  # only consider clean columns
     best, best_score = None, -1
     for c in cols:
         toks = _tokens(c)
@@ -79,12 +98,13 @@ def _fuzzy_find_col(frame: pd.DataFrame, must_have=None, any_of=None):
     return best
 
 def _pick_col(frame, candidates, fuzzy_must=None, fuzzy_any=None):
-    lookup = {str(c).strip().casefold(): c for c in frame.columns}
+    lookup = {str(c).strip().casefold(): c for c in CLEAN_COLS}
     for cand in candidates:
         key = str(cand).strip().casefold()
-        if key in lookup:
+        if key in lookup and _valid_col(frame, lookup[key]):
             return lookup[key]
-    return _fuzzy_find_col(frame, must_have=fuzzy_must, any_of=fuzzy_any)
+    found = _fuzzy_find_col(frame, must_have=fuzzy_must, any_of=fuzzy_any)
+    return found if _valid_col(frame, found) else None
 
 # Broadened candidates (CalGEM variations included)
 col_api        = _pick_col(df, ["API 10","API","API Number","API10","API Number (10)"], fuzzy_any=["api","number","10"])
@@ -108,7 +128,7 @@ col_years_idle = _pick_col(
     fuzzy_must=["idle"], fuzzy_any=["years","yrs","duration"]
 )
 
-# Robust type coercions (incl. Excel serial dates) and helper 'Year'
+# ---------------------- Coercions & helper 'Year' -----------------------------
 def _coerce_idle_start(series: pd.Series) -> pd.Series:
     s = series.copy()
     parsed = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
@@ -155,11 +175,9 @@ def _oldest_idle_well_row(_df: pd.DataFrame):
     return None
 
 def _first_value(row: pd.Series, candidates):
-    """Try multiple columns by priority; return first non-empty value."""
     for c in candidates:
-        if c and c in row.index:
+        if c and c in row.index and not _is_unnamed(str(c)):
             val = _safe_str(row.get(c))
-            # avoid accidentally echoing a column name as value
             if val.lower() not in {str(ca).strip().lower() for ca in candidates}:
                 return val
     return "Unknown"
@@ -190,7 +208,7 @@ domain_context = (
     "Use only columns present in the dataframe. "
     "For 'oldest idle well', prefer the earliest 'Idle Start Date'; if absent, use maximum 'Years Idle'."
 )
-schema_hint = "Columns available: " + ", ".join(map(str, df.columns.tolist())) + "."
+schema_hint = "Columns available: " + ", ".join([c for c in CLEAN_COLS]) + "."
 sdf = SmartDataframe(df, config={"llm": PAIOpenAI(api_token=OPENAI_KEY)})
 
 # ---------------------------- Mic (quiet, optional) ---------------------------
@@ -265,7 +283,7 @@ if run_clicked and confirm_ok and prompt.strip():
     with st.chat_message("user"):
         st.markdown(user_msg)
 
-    # 1) Deterministic FIRST for "oldest" style questions
+    # Deterministic FIRST for "oldest" queries
     if _is_oldest_query(user_msg):
         row = _oldest_idle_well_row(df)
         with st.chat_message("assistant"):
@@ -288,7 +306,7 @@ if run_clicked and confirm_ok and prompt.strip():
                 st.markdown("No idle wells detected from this file.")
                 st.session_state.history.append(("assistant", "No deterministic result."))
     else:
-        # 2) Otherwise, use AI over the dataframe
+        # Otherwise, use AI over the dataframe
         try:
             enriched = f"{domain_context}\n{schema_hint}\n\nQuestion: {user_msg}"
             with st.chat_message("assistant"):
