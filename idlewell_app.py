@@ -1,4 +1,4 @@
-# idlewell_app.py — Idle Well Inventory assistant (robust loader + mic)
+# idlewell_app.py — Idle Well Inventory assistant (robust loader, mic, confirm, minimal UI)
 
 from pathlib import Path
 import re
@@ -23,27 +23,21 @@ if DATA_PATH is None:
 
 # ---------------------------- Robust Excel reader -----------------------------
 HEADER_CANDIDATES = tuple(range(0, 10))  # try first 10 rows as header
-
 SHEET_PREFERENCE = ["inventory", "idle", "iwmp", "public", "sheet1"]
 
-def pick_best_sheet(xl: pd.ExcelFile) -> str:
+def _pick_best_sheet(xl: pd.ExcelFile) -> str:
     names = xl.sheet_names
-    # if only one, use it
     if len(names) == 1:
         return names[0]
-    # prefer names containing keywords
     ranked = sorted(
         names,
-        key=lambda n: (
-            -sum(k in n.strip().lower() for k in SHEET_PREFERENCE),
-            len(n)
-        ),
+        key=lambda n: (-sum(k in n.strip().lower() for k in SHEET_PREFERENCE), len(n)),
     )
     return ranked[0]
 
-def read_excel_robust(path: Path) -> pd.DataFrame:
+def _read_excel_robust(path: Path) -> pd.DataFrame:
     xl = pd.ExcelFile(path)
-    sheet = pick_best_sheet(xl)
+    sheet = _pick_best_sheet(xl)
     last_err = None
     for h in HEADER_CANDIDATES:
         try:
@@ -57,7 +51,7 @@ def read_excel_robust(path: Path) -> pd.DataFrame:
     raise ValueError("Could not find a valid header row in the first 10 rows.")
 
 try:
-    df = read_excel_robust(DATA_PATH)
+    df = _read_excel_robust(DATA_PATH)
 except Exception:
     st.error("Data could not be read. Please verify the Excel format.")
     st.stop()
@@ -92,7 +86,7 @@ def _pick_col(frame, candidates, fuzzy_must=None, fuzzy_any=None):
             return lookup[key]
     return _fuzzy_find_col(frame, must_have=fuzzy_must, any_of=fuzzy_any)
 
-# Broadened candidates
+# Broadened candidates (CalGEM variations included)
 col_api        = _pick_col(df, ["API 10","API","API Number","API10","API Number (10)"], fuzzy_any=["api","number","10"])
 col_well       = _pick_col(df, ["Well Designation","Well Name","Well","Well ID","Well No.","WellNumber"], fuzzy_any=["well","name","designation","id","no","number"])
 col_operator   = _pick_col(df, ["Operator Name","Operator","Current Operator","Operator of Record"], fuzzy_any=["operator","name","record"])
@@ -114,13 +108,10 @@ col_years_idle = _pick_col(
     fuzzy_must=["idle"], fuzzy_any=["years","yrs","duration"]
 )
 
-# ---------------------------- Helper columns ----------------------------------
+# Robust type coercions (incl. Excel serial dates) and helper 'Year'
 def _coerce_idle_start(series: pd.Series) -> pd.Series:
-    # Handle strings, datetimes, and Excel serial numbers
     s = series.copy()
-    # Try parse strings first
     parsed = pd.to_datetime(s, errors="coerce", infer_datetime_format=True)
-    # If still NaT and numeric-like, try Excel serial (days since 1899-12-30)
     needs_serial = parsed.isna() & pd.to_numeric(s, errors="coerce").notna()
     if needs_serial.any():
         nums = pd.to_numeric(s[needs_serial], errors="coerce")
@@ -128,40 +119,49 @@ def _coerce_idle_start(series: pd.Series) -> pd.Series:
         parsed.loc[needs_serial] = serial_dt
     return parsed
 
-if col_idle_start:
+if col_idle_start and col_idle_start in df.columns:
     df[col_idle_start] = _coerce_idle_start(df[col_idle_start])
     if "Year" not in df.columns:
         df["Year"] = df[col_idle_start].dt.year
 
-if "Year" not in df.columns and col_years_idle:
-    current_year = pd.Timestamp.now().year
+if col_years_idle and col_years_idle in df.columns:
     df[col_years_idle] = pd.to_numeric(df[col_years_idle], errors="coerce")
-    df["Year"] = current_year - df[col_years_idle]
+    if "Year" not in df.columns:
+        current_year = pd.Timestamp.now().year
+        df["Year"] = current_year - df[col_years_idle]
 
 # ---------------------- Deterministic fallback logic --------------------------
 def _oldest_idle_well_row(_df: pd.DataFrame):
-    # prefer earliest Idle Start Date
     if col_idle_start and col_idle_start in _df.columns:
         tmp = _df.dropna(subset=[col_idle_start])
         if len(tmp):
             return tmp.sort_values(col_idle_start, ascending=True).iloc[0]
-    # else max Years Idle
     if col_years_idle and col_years_idle in _df.columns:
-        tmp = _df.copy()
-        tmp[col_years_idle] = pd.to_numeric(tmp[col_years_idle], errors="coerce")
-        tmp = tmp.dropna(subset=[col_years_idle])
+        tmp = _df.dropna(subset=[col_years_idle])
         if len(tmp):
             return tmp.sort_values(col_years_idle, ascending=False).iloc[0]
     return None
 
+def _safe_str(v):
+    try:
+        import pandas as pd
+        if v is None:
+            return "Unknown"
+        if hasattr(pd, "isna") and pd.isna(v):
+            return "Unknown"
+        s = str(v).strip()
+        return s if s else "Unknown"
+    except Exception:
+        return "Unknown"
+
 def _summarize_row(r: pd.Series):
     return {
-        (col_api or "API"): r.get(col_api) if col_api else None,
-        (col_well or "Well"): r.get(col_well) if col_well else None,
-        (col_operator or "Operator"): r.get(col_operator) if col_operator else None,
-        (col_idle_start or "Idle Start Date"): str(r.get(col_idle_start)) if col_idle_start else None,
-        (col_years_idle or "Years Idle"): r.get(col_years_idle) if col_years_idle else None,
-        "Year": r.get("Year") if "Year" in df.columns else None,
+        (col_api or "API"): _safe_str(r.get(col_api)) if col_api else "Unknown",
+        (col_well or "Well"): _safe_str(r.get(col_well)) if col_well else "Unknown",
+        (col_operator or "Operator"): _safe_str(r.get(col_operator)) if col_operator else "Unknown",
+        (col_idle_start or "Idle Start Date"): _safe_str(r.get(col_idle_start)) if col_idle_start else "Unknown",
+        (col_years_idle or "Years Idle"): _safe_str(r.get(col_years_idle)) if col_years_idle else "Unknown",
+        "Year": _safe_str(r.get("Year")) if "Year" in r.index else "Unknown",
     }
 
 # ---------------------------- AI backend --------------------------------------
@@ -183,14 +183,14 @@ domain_context = (
 schema_hint = "Columns available: " + ", ".join(map(str, df.columns.tolist())) + "."
 sdf = SmartDataframe(df, config={"llm": PAIOpenAI(api_token=OPENAI_KEY)})
 
-# ---------------------------- Mic (quiet) -------------------------------------
+# ---------------------------- Mic (quiet, optional) ---------------------------
 try:
     from streamlit_mic_recorder import mic_recorder
     MIC_OK = True
 except Exception:
     MIC_OK = False
 
-# ---------------------------- Minimal UI --------------------------------------
+# ---------------------------- Minimal UI (mic → confirm → answer) ------------
 if "history" not in st.session_state:
     st.session_state.history = []
 if "pending_text" not in st.session_state:
@@ -210,7 +210,7 @@ if MIC_OK:
         key="mic",
     )
 
-# If voice provided, transcribe silently to the text box
+# If voice provided, transcribe silently into the text box
 if audio and "bytes" in audio and audio["bytes"]:
     try:
         client = OAClient(api_key=OPENAI_KEY)
@@ -224,7 +224,6 @@ if audio and "bytes" in audio and audio["bytes"]:
     except Exception:
         pass  # stay silent; user can still type
 
-# Single compact input area (pre-filled by mic transcript if present)
 prompt = st.text_input(
     "Ask about the Idle Well Inventory…",
     value=st.session_state.pending_text,
@@ -242,7 +241,6 @@ with col_clear:
         st.session_state.pending_text = ""
         st.experimental_rerun()
 
-# Handle query
 if run_clicked and confirm_ok and prompt.strip():
     user_msg = prompt.strip()
     st.session_state.history.append(("user", user_msg))
@@ -256,7 +254,7 @@ if run_clicked and confirm_ok and prompt.strip():
             st.markdown(str(answer))
             st.session_state.history.append(("assistant", str(answer)))
     except Exception:
-        # Silent fallback for "oldest idle well" type
+        # Silent deterministic fallback for "oldest idle well" type questions
         text = user_msg.casefold()
         with st.chat_message("assistant"):
             if "oldest" in text and ("idle" in text or "well" in text):
@@ -264,7 +262,7 @@ if run_clicked and confirm_ok and prompt.strip():
                 if row is not None:
                     result = _summarize_row(row)
                     st.markdown(
-                        f"**Oldest idle well (deterministic):**\n\n"
+                        "**Oldest idle well (deterministic):**\n"
                         f"- API: `{result.get(col_api or 'API')}`\n"
                         f"- Well: `{result.get(col_well or 'Well')}`\n"
                         f"- Operator: `{result.get(col_operator or 'Operator')}`\n"
