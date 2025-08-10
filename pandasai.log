@@ -1,0 +1,46 @@
+2025-08-02 18:49:53 [INFO] Question: tell me how many wells chevron has on the idle well list
+2025-08-02 18:49:53 [INFO] Running PandasAI with openai LLM...
+2025-08-02 18:49:53 [INFO] Prompt ID: 38a22873-35ba-4ebf-8876-868622272d9e
+2025-08-02 18:49:53 [INFO] Executing Pipeline: GenerateChatPipeline
+2025-08-02 18:49:53 [INFO] Executing Step 0: ValidatePipelineInput
+2025-08-02 18:49:53 [INFO] Executing Step 1: CacheLookup
+2025-08-02 18:49:53 [INFO] Executing Step 2: PromptGeneration
+2025-08-02 18:49:53 [INFO] Using prompt: <dataframe>
+dfs[0]:29953x14
+Rev 1.1: Updated: 4/2/2024,Unnamed: 1,"*Preliminary 2024 Idle Well Management Plan (IWMP Inventory). Includes only wells that were idle on January 1, 2024.",Unnamed: 3,Unnamed: 4,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13
+2076290101,Unspecified 37BWI-1C,03473,Joseph K. Tobin,Oil & Gas,Seal Beach,Anchor,Inland,"07, 01N, 14W, SB",Riverside,1937-09-11,93.58333333333333,Yes,No
+8632185720,,P3850,Sentinel Peak Resources California LLC,Unknown,Las Cienegas,Puente,District,"26, 05S, 11W, SB",Santa Barbara,2017-02-01,5.0,No,Unsatisfactory Abandonment (Yes or No)
+3535999489,Cahn 7-6W,02320,Golden State Oil Co.,Water Disposal,Torrey Canyon,Victor Ranch,Northern,"16, 16N, 01W, MD",Ventura Offshore,2016-02-01,3.5,Is LTIW (Yes or No),Yes
+</dataframe>
+
+
+
+
+Update this initial code:
+```python
+# TODO: import the required dependencies
+import pandas as pd
+
+# Write code here
+
+# Declare result var: 
+type (possible values "string", "number", "dataframe", "plot"). Examples: { "type": "string", "value": f"The highest salary is {highest_salary}." } or { "type": "number", "value": 125 } or { "type": "dataframe", "value": pd.DataFrame({...}) } or { "type": "plot", "value": "temp_chart.png" }
+
+```
+
+
+
+### QUERY
+ tell me how many wells chevron has on the idle well list
+
+Variable `dfs: list[pd.DataFrame]` is already declared.
+
+At the end, declare "result" variable as a dictionary of type and value.
+
+If you are asked to plot a chart, use "matplotlib" for charts, save as png.
+
+
+Generate python code and return full updated code:
+2025-08-02 18:49:53 [INFO] Executing Step 3: CodeGenerator
+2025-08-02 18:49:54 [INFO] HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 401 Unauthorized"
+2025-08-02 18:49:54 [ERROR] Pipeline failed on step 3: Error code: 401 - {'error': {'message': 'Incorrect API key provided: sk-proj-.... You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}
