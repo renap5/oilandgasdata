@@ -1,7 +1,8 @@
 streamlit
 pandas==1.5.3
 pandasai==2.3.2
-openai
-pyyaml
 openpyxl
+pyyaml
+openai
+
 
