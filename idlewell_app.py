@@ -1,139 +1,131 @@
-# idlewell_app.py
+# idlewell_app.py  — minimal chat-only UI
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 from pathlib import Path
 
-st.set_page_config(page_title="Idle Well Data Assistant", layout="wide")
-st.title("Idle Well Data Assistant")
-st.caption("Loads CalGEM Excel from the repository, normalizes columns, and (optionally) enables AI chat.")
+st.set_page_config(page_title="Idle Well Assistant", layout="wide")
 
-# ---------- Configure data path(s) ----------
-REPO_DIR = Path(__file__).parent.resolve()
-CANDIDATE_PATHS = [
-    REPO_DIR / "data" / "2024_IWMP_Inventory_Public.xlsx",
-    REPO_DIR / "2024_IWMP_Inventory_Public.xlsx",
-]
+# --------- Load & prep data (silent) ---------
+def find_repo_excel():
+    repo_dir = Path(__file__).parent.resolve()
+    candidates = [
+        repo_dir / "data" / "2024_IWMP_Inventory_Public.xlsx",
+        repo_dir / "2024_IWMP_Inventory_Public.xlsx",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
 
-DATA_PATH = next((p for p in CANDIDATE_PATHS if p.exists()), None)
+def read_excel_with_header_guess(path, header_candidates=(0, 1, 2)):
+    last_err = None
+    for h in header_candidates:
+        try:
+            _df = pd.read_excel(path, header=h)
+            if _df.shape[1] >= 2:
+                return _df
+        except Exception as e:
+            last_err = e
+    if last_err:
+        raise last_err
+    raise ValueError("Failed reading Excel with header guesses")
+
+def normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def find_col(frame: pd.DataFrame, candidates):
+        lookup = {str(c).strip().casefold(): c for c in frame.columns}
+        for name in candidates:
+            key = str(name).strip().casefold()
+            if key in lookup:
+                return lookup[key]
+        return None
+
+    # Broad candidates for common CalGEM headers
+    idle_start_candidates = [
+        "Idle Start Date","Idle Start","IdleStartDate","Date Idle Start",
+        "Idle_Start_Date","Idle start date","Idle Start Dt","Idle Date Start"
+    ]
+    years_idle_candidates = [
+        "Years Idle","Idle Years","YearsIdle","Years idle",
+        "Years_Idle","Yrs Idle","Years of Idle","Years Idle (yrs)"
+    ]
+
+    col_idle_start = find_col(df, idle_start_candidates)
+    col_years_idle = find_col(df, years_idle_candidates)
+
+    # Build helper columns silently
+    if col_idle_start:
+        df[col_idle_start] = pd.to_datetime(df[col_idle_start], errors="coerce")
+        df["Year"] = df[col_idle_start].dt.year
+
+    if "Year" not in df.columns and col_years_idle:
+        current_year = pd.Timestamp.now().year
+        yi = pd.to_numeric(df[col_years_idle], errors="coerce")
+        df["Year"] = current_year - yi
+
+    if col_years_idle:
+        df[col_years_idle] = pd.to_numeric(df[col_years_idle], errors="coerce")
+
+    return df
+
+# Try to load data
+DATA_PATH = find_repo_excel()
 if DATA_PATH is None:
-    st.error(
-        "Could not find the Excel file in the repo.\n\n"
-        "Place it at **data/2024_IWMP_Inventory_Public.xlsx** or at the repo root as "
-        "**2024_IWMP_Inventory_Public.xlsx**, commit, and redeploy."
-    )
+    st.error("Data not available. Please add the Excel file to the repository and redeploy.")
     st.stop()
 
-st.write(f"**Using file:** `{DATA_PATH.relative_to(REPO_DIR)}`")
-
-# ---------- Load Excel ----------
 try:
-    df = pd.read_excel(DATA_PATH)
+    df = read_excel_with_header_guess(DATA_PATH, header_candidates=(0, 1, 2))
+    df = normalize_df(df)
 except Exception as e:
-    st.error(f"Failed to read Excel: {e}")
+    st.error("Data could not be prepared. Please contact support.")
     st.stop()
 
-# ---------- Normalize columns & helpers ----------
-# Strip whitespace from column names
-df.columns = [str(c).strip() for c in df.columns]
+# --------- AI chat (minimal interface) ---------
+try:
+    from pandasai import SmartDataframe
+    from pandasai.llm import OpenAI as PAIOpenAI
+    OPENAI_KEY = st.secrets["openai"]["api_key"]
+except Exception:
+    st.error("AI is unavailable. Check that OpenAI key is set in Streamlit Secrets and pandasai is installed.")
+    st.stop()
 
-def find_col(frame: pd.DataFrame, candidates):
-    """Return the actual column name that case-insensitively matches any candidate."""
-    lookup = {str(c).strip().casefold(): c for c in frame.columns}
-    for name in candidates:
-        key = str(name).strip().casefold()
-        if key in lookup:
-            return lookup[key]
-    return None
+# Give the model a short schema hint to avoid inventing columns
+schema_hint = (
+    "Use only these columns: "
+    + ", ".join(map(str, df.columns.tolist()))
+    + ". If you need well age, use 'Years Idle' or compute from 'Idle Start Date'."
+)
 
-# Map typical CalGEM headers (adjust if your file differs)
-col_api         = find_col(df, ["API 10", "API", "API Number", "API10"])
-col_well        = find_col(df, ["Well Designation", "Well Name", "Well"])
-col_op          = find_col(df, ["Operator Name", "Operator"])
-col_idle_start  = find_col(df, ["Idle Start Date", "Idle Start", "IdleStartDate"])
-col_years_idle  = find_col(df, ["Years Idle", "Idle Years", "YearsIdle"])
+sdf = SmartDataframe(df, config={"llm": PAIOpenAI(api_token=OPENAI_KEY)})
 
-# Create 'Year' column if possible
-if col_idle_start:
-    df[col_idle_start] = pd.to_datetime(df[col_idle_start], errors="coerce")
-    df["Year"] = df[col_idle_start].dt.year
+# Clean chat-only UI
+st.markdown("## Ask about the dataset")
+user_msg = st.chat_input("Ask a question (SQL or natural language)…")
 
-if "Year" not in df.columns and col_years_idle:
-    current_year = pd.Timestamp.now().year
-    yi = pd.to_numeric(df[col_years_idle], errors="coerce")
-    df["Year"] = current_year - yi
+# Optional: keep short chat history
+if "history" not in st.session_state:
+    st.session_state.history = []
 
-# Coerce Years Idle to numeric for later calcs
-if col_years_idle:
-    df[col_years_idle] = pd.to_numeric(df[col_years_idle], errors="coerce")
+for role, content in st.session_state.history:
+    with st.chat_message(role):
+        st.markdown(content)
 
-# ---------- Preview ----------
-with st.expander("Preview data"):
-    st.write("**Columns:**", list(df.columns))
-    st.dataframe(df.head(25), use_container_width=True)
+if user_msg:
+    st.session_state.history.append(("user", user_msg))
+    with st.chat_message("user"):
+        st.markdown(user_msg)
 
-# ---------- Fallback: Oldest idle well ----------
-def compute_oldest_row(_df: pd.DataFrame):
-    if col_idle_start and col_idle_start in _df.columns:
-        tmp = _df.dropna(subset=[col_idle_start]).copy()
-        if len(tmp) == 0:
-            return None
-        return tmp.sort_values(col_idle_start, ascending=True).iloc[0]
-    if col_years_idle and col_years_idle in _df.columns:
-        tmp = _df.dropna(subset=[col_years_idle]).copy()
-        if len(tmp) == 0:
-            return None
-        return tmp.sort_values(col_years_idle, ascending=False).iloc[0]
-    return None
-
-st.subheader("Quick analysis")
-row = compute_oldest_row(df)
-if row is None:
-    st.warning("Could not determine the oldest idle well (need 'Idle Start Date' or 'Years Idle').")
-else:
-    st.success("Oldest idle well (deterministic fallback):")
-    st.write({
-        (col_api or "API"): row.get(col_api) if col_api else None,
-        (col_well or "Well"): row.get(col_well) if col_well else None,
-        (col_op or "Operator"): row.get(col_op) if col_op else None,
-        (col_idle_start or "Idle Start Date"): str(row.get(col_idle_start)) if col_idle_start else None,
-        (col_years_idle or "Years Idle"): row.get(col_years_idle) if col_years_idle else None,
-        "Year": row.get("Year") if "Year" in df.columns else None,
-    })
-
-# ---------- Optional: AI chat over the DataFrame ----------
-st.subheader("Ask questions with AI (optional)")
-enable_ai = st.toggle("Enable AI chat", value=False, help="Requires OpenAI API key in Streamlit Secrets.")
-
-if enable_ai:
     try:
-        from pandasai import SmartDataframe
-        from pandasai.llm import OpenAI as PAIOpenAI
-
-        # Read from Streamlit Secrets (Streamlit Cloud: Manage app → Settings → Secrets)
-        OPENAI_KEY = st.secrets["openai"]["api_key"]
-
-        # Schema hint to reduce LLM hallucinating columns
-        schema_hint = (
-            "Use only these columns: "
-            + ", ".join(map(str, df.columns.tolist()))
-            + ". If you need well age, prefer 'Years Idle' or compute from 'Idle Start Date'."
-        )
-
-        sdf = SmartDataframe(df, config={"llm": PAIOpenAI(api_token=OPENAI_KEY)})
-
-        q = st.text_input("Ask a question about the dataset:")
-        if q:
-            with st.spinner("Thinking..."):
-                answer = sdf.chat(schema_hint + " " + q)
-            st.write("**Answer:**")
-            st.write(answer)
-
-    except KeyError:
-        st.error(
-            "OpenAI API key not found in Streamlit Secrets.\n"
-            "Add under Settings → Secrets:\n\n[openai]\napi_key = \"sk-...\""
-        )
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                answer = sdf.chat(schema_hint + " " + user_msg)
+            st.markdown(str(answer))
+            st.session_state.history.append(("assistant", str(answer)))
     except Exception as e:
-        st.error(f"AI chat failed: {e}")
+        with st.chat_message("assistant"):
+            st.markdown("Sorry, I couldn’t answer that.")
