@@ -1,17 +1,14 @@
-# idlewell_app.py — Idle Well Inventory assistant (chat-only + microphone)
+# idlewell_app.py — Idle Well Inventory assistant (minimal UI, mic + confirm)
 
 from pathlib import Path
 import re
 import tempfile
-
 import numpy as np
 import pandas as pd
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
 
 # ---------------------------- Page setup --------------------------------------
 st.set_page_config(page_title="Idle Well Inventory Assistant", layout="wide")
-st.markdown("## Ask about the Idle Well Inventory")
 
 # ---------------------------- Data loading ------------------------------------
 REPO_DIR = Path(__file__).parent.resolve()
@@ -136,29 +133,37 @@ domain_context = (
     "For 'oldest idle well', prefer the earliest 'Idle Start Date'; if absent, use maximum 'Years Idle'."
 )
 schema_hint = "Columns available: " + ", ".join(map(str, df.columns.tolist())) + "."
-
 sdf = SmartDataframe(df, config={"llm": PAIOpenAI(api_token=OPENAI_KEY)})
 
-# ---------------------------- Chat UI + Mic -----------------------------------
+# ---------------------------- Mic (quiet) -------------------------------------
+try:
+    from streamlit_mic_recorder import mic_recorder
+    MIC_OK = True
+except Exception:
+    MIC_OK = False
+
+# ---------------------------- Minimal UI --------------------------------------
 if "history" not in st.session_state:
     st.session_state.history = []
+if "pending_text" not in st.session_state:
+    st.session_state.pending_text = ""
 
 for role, content in st.session_state.history:
     with st.chat_message(role):
         st.markdown(content)
 
-st.caption("Tap to speak, or type below.")
-audio = mic_recorder(
-    start_prompt="🎤 Start recording",
-    stop_prompt="■ Stop",
-    just_once=False,
-    use_container_width=True,
-    key="mic",
-)
+# Compact voice capture (no extra chatter)
+audio = None
+if MIC_OK:
+    audio = mic_recorder(
+        start_prompt="🎤 Speak",
+        stop_prompt="■ Stop",
+        just_once=False,
+        use_container_width=True,
+        key="mic",
+    )
 
-user_msg = None
-
-# Voice → text via Whisper
+# If voice provided, transcribe silently to the text box
 if audio and "bytes" in audio and audio["bytes"]:
     try:
         client = OAClient(api_key=OPENAI_KEY)
@@ -166,18 +171,29 @@ if audio and "bytes" in audio and audio["bytes"]:
             tmp.write(audio["bytes"])
             tmp.flush()
             with open(tmp.name, "rb") as f:
-                # Whisper transcription (new-style client)
                 tr = client.audio.transcriptions.create(model="whisper-1", file=f)
-        user_msg = tr.text if hasattr(tr, "text") else None
-    except Exception as e:
-        st.warning(f"Voice transcription failed; please type instead. ({e})")
+        if hasattr(tr, "text") and tr.text:
+            st.session_state.pending_text = tr.text
+    except Exception:
+        # Stay silent; user can still type
+        pass
 
-if not user_msg:
-    typed = st.chat_input("Type a question…")
-    if typed:
-        user_msg = typed
+# Single compact input area (pre-filled by mic transcript if present)
+prompt = st.text_input("Ask about the Idle Well Inventory…", value=st.session_state.pending_text, label_visibility="collapsed", placeholder="Ask a question…")
+confirm_ok = st.checkbox("✔️ Transcription looks correct (or I typed my question)", value=bool(prompt))
 
-if user_msg:
+col_run, col_clear = st.columns([1,1])
+with col_run:
+    run_clicked = st.button("Ask")
+with col_clear:
+    if st.button("Clear"):
+        st.session_state.history = []
+        st.session_state.pending_text = ""
+        st.experimental_rerun()
+
+# Only proceed when user confirms
+if run_clicked and confirm_ok and prompt.strip():
+    user_msg = prompt.strip()
     st.session_state.history.append(("user", user_msg))
     with st.chat_message("user"):
         st.markdown(user_msg)
@@ -185,23 +201,21 @@ if user_msg:
     try:
         enriched = f"{domain_context}\n{schema_hint}\n\nQuestion: {user_msg}"
         with st.chat_message("assistant"):
-            with st.spinner("Thinking…"):
-                answer = sdf.chat(enriched)
+            answer = sdf.chat(enriched)
             st.markdown(str(answer))
             st.session_state.history.append(("assistant", str(answer)))
     except Exception:
-        # Fallback for "oldest idle well" type questions
+        # Silent fallback for “oldest idle well” type
         text = user_msg.casefold()
         with st.chat_message("assistant"):
             if "oldest" in text and ("idle" in text or "well" in text):
                 row = _oldest_idle_well_row(df)
                 if row is not None:
-                    st.markdown("**Oldest idle well (deterministic result):**")
                     st.json(_summarize_row(row))
                     st.session_state.history.append(("assistant", "Returned deterministic oldest idle well result."))
                 else:
-                    st.markdown("I couldn’t infer the oldest idle well from this file.")
-                    st.session_state.history.append(("assistant", "No oldest idle well could be inferred."))
+                    st.markdown("No result found from this file.")
+                    st.session_state.history.append(("assistant", "No deterministic result."))
             else:
-                st.markdown("Sorry, I couldn’t answer that.")
-                st.session_state.history.append(("assistant", "Could not answer due to an internal error."))
+                st.markdown("I couldn’t answer that.")
+                st.session_state.history.append(("assistant", "Unhandled error."))
