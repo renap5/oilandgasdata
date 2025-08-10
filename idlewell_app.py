@@ -1,4 +1,4 @@
-# idlewell_app.py — Idle Well Inventory assistant (robust loader, mic, confirm, minimal UI)
+# idlewell_app.py — Idle Well Inventory assistant (robust loader, mic, confirm, deterministic "oldest" answer)
 
 from pathlib import Path
 import re
@@ -130,18 +130,7 @@ if col_years_idle and col_years_idle in df.columns:
         current_year = pd.Timestamp.now().year
         df["Year"] = current_year - df[col_years_idle]
 
-# ---------------------- Deterministic fallback logic --------------------------
-def _oldest_idle_well_row(_df: pd.DataFrame):
-    if col_idle_start and col_idle_start in _df.columns:
-        tmp = _df.dropna(subset=[col_idle_start])
-        if len(tmp):
-            return tmp.sort_values(col_idle_start, ascending=True).iloc[0]
-    if col_years_idle and col_years_idle in _df.columns:
-        tmp = _df.dropna(subset=[col_years_idle])
-        if len(tmp):
-            return tmp.sort_values(col_years_idle, ascending=False).iloc[0]
-    return None
-
+# ---------------------- Deterministic helpers (NaN-safe) ----------------------
 def _safe_str(v):
     try:
         import pandas as pd
@@ -154,13 +143,34 @@ def _safe_str(v):
     except Exception:
         return "Unknown"
 
+def _oldest_idle_well_row(_df: pd.DataFrame):
+    if col_idle_start and col_idle_start in _df.columns:
+        tmp = _df.dropna(subset=[col_idle_start])
+        if len(tmp):
+            return tmp.sort_values(col_idle_start, ascending=True).iloc[0]
+    if col_years_idle and col_years_idle in _df.columns:
+        tmp = _df.dropna(subset=[col_years_idle])
+        if len(tmp):
+            return tmp.sort_values(col_years_idle, ascending=False).iloc[0]
+    return None
+
+def _first_value(row: pd.Series, candidates):
+    """Try multiple columns by priority; return first non-empty value."""
+    for c in candidates:
+        if c and c in row.index:
+            val = _safe_str(row.get(c))
+            # avoid accidentally echoing a column name as value
+            if val.lower() not in {str(ca).strip().lower() for ca in candidates}:
+                return val
+    return "Unknown"
+
 def _summarize_row(r: pd.Series):
     return {
-        (col_api or "API"): _safe_str(r.get(col_api)) if col_api else "Unknown",
-        (col_well or "Well"): _safe_str(r.get(col_well)) if col_well else "Unknown",
-        (col_operator or "Operator"): _safe_str(r.get(col_operator)) if col_operator else "Unknown",
-        (col_idle_start or "Idle Start Date"): _safe_str(r.get(col_idle_start)) if col_idle_start else "Unknown",
-        (col_years_idle or "Years Idle"): _safe_str(r.get(col_years_idle)) if col_years_idle else "Unknown",
+        "API": _first_value(r, [col_api]),
+        "Well": _first_value(r, [col_well, "Well", "Well Name", "Well Designation"]),
+        "Operator": _first_value(r, [col_operator, "Operator Name", "Operator"]),
+        "Idle Start Date": _first_value(r, [col_idle_start, "Idle Start Date"]),
+        "Years Idle": _first_value(r, [col_years_idle, "Years Idle"]),
         "Year": _safe_str(r.get("Year")) if "Year" in r.index else "Unknown",
     }
 
@@ -210,7 +220,7 @@ if MIC_OK:
         key="mic",
     )
 
-# If voice provided, transcribe silently into the text box
+# Transcribe voice silently into the text box
 if audio and "bytes" in audio and audio["bytes"]:
     try:
         client = OAClient(api_key=OPENAI_KEY)
@@ -222,7 +232,7 @@ if audio and "bytes" in audio and audio["bytes"]:
         if hasattr(tr, "text") and tr.text:
             st.session_state.pending_text = tr.text
     except Exception:
-        pass  # stay silent; user can still type
+        pass  # silent
 
 prompt = st.text_input(
     "Ask about the Idle Well Inventory…",
@@ -241,38 +251,51 @@ with col_clear:
         st.session_state.pending_text = ""
         st.experimental_rerun()
 
+def _is_oldest_query(q: str) -> bool:
+    ql = q.casefold()
+    return ("oldest" in ql or "earliest" in ql) and ("idle" in ql or "well" in ql)
+
+def _wants_operator(q: str) -> bool:
+    ql = q.casefold()
+    return "operator" in ql or "who" in ql or "which company" in ql
+
 if run_clicked and confirm_ok and prompt.strip():
     user_msg = prompt.strip()
     st.session_state.history.append(("user", user_msg))
     with st.chat_message("user"):
         st.markdown(user_msg)
 
-    try:
-        enriched = f"{domain_context}\n{schema_hint}\n\nQuestion: {user_msg}"
+    # 1) Deterministic FIRST for "oldest" style questions
+    if _is_oldest_query(user_msg):
+        row = _oldest_idle_well_row(df)
         with st.chat_message("assistant"):
-            answer = sdf.chat(enriched)
-            st.markdown(str(answer))
-            st.session_state.history.append(("assistant", str(answer)))
-    except Exception:
-        # Silent deterministic fallback for "oldest idle well" type questions
-        text = user_msg.casefold()
-        with st.chat_message("assistant"):
-            if "oldest" in text and ("idle" in text or "well" in text):
-                row = _oldest_idle_well_row(df)
-                if row is not None:
-                    result = _summarize_row(row)
+            if row is not None:
+                res = _summarize_row(row)
+                if _wants_operator(user_msg):
                     st.markdown(
-                        "**Oldest idle well (deterministic):**\n"
-                        f"- API: `{result.get(col_api or 'API')}`\n"
-                        f"- Well: `{result.get(col_well or 'Well')}`\n"
-                        f"- Operator: `{result.get(col_operator or 'Operator')}`\n"
-                        f"- Idle Start Date: `{result.get(col_idle_start or 'Idle Start Date')}`\n"
-                        f"- Years Idle: `{result.get(col_years_idle or 'Years Idle')}`"
+                        f"The oldest idle well is **{res['Well']}** (API {res['API']}) "
+                        f"operated by **{res['Operator']}**. "
+                        f"Idle Start Date: {res['Idle Start Date']}; Years Idle: {res['Years Idle']}."
                     )
-                    st.session_state.history.append(("assistant", "Returned deterministic oldest idle well result."))
                 else:
-                    st.markdown("No idle wells detected from this file.")
-                    st.session_state.history.append(("assistant", "No deterministic result."))
+                    st.markdown(
+                        f"Oldest idle well: **{res['Well']}** (API {res['API']}). "
+                        f"Operator: {res['Operator']}. "
+                        f"Idle Start Date: {res['Idle Start Date']}; Years Idle: {res['Years Idle']}."
+                    )
+                st.session_state.history.append(("assistant", "Returned deterministic oldest idle well result."))
             else:
+                st.markdown("No idle wells detected from this file.")
+                st.session_state.history.append(("assistant", "No deterministic result."))
+    else:
+        # 2) Otherwise, use AI over the dataframe
+        try:
+            enriched = f"{domain_context}\n{schema_hint}\n\nQuestion: {user_msg}"
+            with st.chat_message("assistant"):
+                answer = sdf.chat(enriched)
+                st.markdown(str(answer))
+                st.session_state.history.append(("assistant", str(answer)))
+        except Exception:
+            with st.chat_message("assistant"):
                 st.markdown("I couldn’t answer that.")
                 st.session_state.history.append(("assistant", "Unhandled error."))
