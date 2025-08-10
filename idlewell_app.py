@@ -13,7 +13,7 @@ llm = OpenAI(api_token="sk-proj-...")  # Replace with your key
 sdf = SmartDataframe(df, config={"llm": llm})
 
 # Streamlit UI
-st.title("🛢️ Idle Well Explorer")
+st.title("ðŸ›¢ï¸ Idle Well Explorer")
 st.markdown("Ask questions about the CalGEM Idle Well data")
 
 query = st.text_input("Ask your question here:")
